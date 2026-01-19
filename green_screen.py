@@ -1,10 +1,15 @@
 # Green Screen Replacement Script
-# Usage: python green_screen.py <input_h5_file_or_folder> <background_image_or_folder> [--camera all|third|gripper] [--debug-mask]
+# Usage: python green_screen.py <input_h5_file_or_folder> <background_image_or_folder> [--camera all|third|gripper]
 
 import cv2
 import numpy as np
 import h5py
 import argparse
+import os
+
+# Global HSV Configuration
+LOWER_HSV = np.array([35, 60, 50])
+UPPER_HSV = np.array([85, 255, 255])
 
 def get_mask(frame, lower_hsv, upper_hsv):
     """Creates a binary mask for green pixels using HSV with refinement."""
@@ -43,94 +48,72 @@ def process_video(name, in_ds, out_ds, bg_img, lower_hsv, upper_hsv):
             if len(frame.shape) == 2: frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
             mask = get_mask(frame, lower_hsv, upper_hsv)
             
+            # Simple Masking
+            mask_inv = cv2.bitwise_not(mask)
+            fg = cv2.bitwise_and(frame, frame, mask=mask_inv)
+            bg = cv2.bitwise_and(bg_resized, bg_resized, mask=mask)
+            processed[j] = cv2.add(fg, bg)
+
+            # OR
+
             # Feathering (Soft Edges)
-            mask_soft = cv2.GaussianBlur(mask, (13, 13), 0)
+            # mask_soft = cv2.GaussianBlur(mask, (13, 13), 0)
             
-            # Alpha Blending
-            alpha = mask_soft.astype(float) / 255.0
-            alpha = cv2.merge([alpha, alpha, alpha])
+            # # Alpha Blending
+            # alpha = mask_soft.astype(float) / 255.0
+            # alpha = cv2.merge([alpha, alpha, alpha])
             
-            frame_float = frame.astype(float)
-            combined = frame_float * (1.0 - alpha) + bg_float * alpha
-            processed[j] = combined.astype(np.uint8)
+            # frame_float = frame.astype(float)
+            # combined = frame_float * (1.0 - alpha) + bg_float * alpha
+            # processed[j] = combined.astype(np.uint8)
         
         out_ds[i:end] = processed
         print(f"  {end}/{num_frames}", end='\r')
     print("")
 
-def process_file(input_path, background_path, output_path, camera_filter='all', debug_mask=False):
-    bg_img = cv2.imread(background_path) if not debug_mask else None
-    if not debug_mask and bg_img is None:
+def process_file(input_path, background_path, output_path, camera_filter='all'):
+    bg_img = cv2.imread(background_path)
+    if bg_img is None:
         print(f"Error: Could not load {background_path}")
         return
-
-    # HSV Configuration
-    lower_hsv = np.array([35, 60, 80])
-    upper_hsv = np.array([85, 255, 255])
     
-    if debug_mask:
-        print(f"DEBUG MASK MODE: Showing mask in RED for first video.")
-        print(f"HSV Range: {lower_hsv} to {upper_hsv}")
-
     with h5py.File(input_path, 'r') as infile, h5py.File(output_path, 'w') as outfile:
         # Copy file-level attributes
-        for k, v in infile.attrs.items():
-            outfile.attrs[k] = v
-            
+        for key, val in infile.attrs.items():
+            outfile.attrs[key] = val
+
         def visit_item(name, obj):
-            if name in outfile: return
-            
             if isinstance(obj, h5py.Group):
-                dst = outfile.create_group(name)
-                for k, v in obj.attrs.items(): dst.attrs[k] = v
-            
+                if name not in outfile:
+                    outfile.create_group(name)
             elif isinstance(obj, h5py.Dataset):
-                is_video = False
-                should_mask = False
+                # Check for camera filter
+                path_lower = name.lower()
+                is_gripper = any(k in path_lower for k in ['gripper', 'eye_in_hand', 'wrist'])
+                is_third = any(k in path_lower for k in ['agentview', 'third', 'external', 'front'])
                 
-                # Heuristic to detect video datasets and specific cameras
-                if len(obj.shape) >= 3:
-                     path = name.lower()
-                     is_gripper = any(k in path for k in ['gripper', 'eye_in_hand', 'wrist'])
-                     is_third = any(k in path for k in ['agentview', 'third', 'external', 'front', 'primary'])
-                     is_video = True
-                     
-                     # Simple logic: 'all' masks everything, specific filters mask only matches
-                     if camera_filter == 'all':
-                         should_mask = True
-                     elif camera_filter == 'third':
-                         should_mask = is_third
-                     elif camera_filter == 'gripper':
-                         should_mask = is_gripper
-
+                should_process = False
+                if camera_filter == 'all': should_process = True
+                elif camera_filter == 'gripper' and is_gripper: should_process = True
+                elif camera_filter == 'third' and is_third and not is_gripper: should_process = True
+                
+                # Check if it's a video (3D array)
+                is_video = len(obj.shape) >= 3
+                
+                # MASKING LOGIC: Only mask third-person cameras
+                should_mask = is_third and not is_gripper
+                
                 if is_video and should_mask:
-                    if debug_mask:
-                        print(f"Debugging mask for: {name}")
-                        frame = obj[0]
-                         # Normalize and ensure BGR for debug view
-                        if frame.dtype != np.uint8:
-                            frame = (frame * 255).astype(np.uint8) if frame.max() <= 1.0 else frame.astype(np.uint8)
-                        if len(frame.shape) == 2: frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-                        
-                        mask = get_mask(frame, lower_hsv, upper_hsv)
-                        vis = frame.copy()
-                        vis[mask > 0] = [0, 0, 255] # Red overlay
-                        
-                        cv2.imshow("Debug Mask (Red = Assigned to Background)", vis)
-                        print("Press any key to exit debug mode...")
-                        cv2.waitKey(0)
-                        cv2.destroyAllWindows()
-                        import sys; sys.exit(0)
-
-                    # Create output dataset
+                    # Apply Green Screen Logic
+                    print(f"Processing (Masking): {name}")
+                    # Create dataset in output file
                     ds = outfile.create_dataset(name, shape=obj.shape, dtype=obj.dtype, chunks=True, compression='gzip')
                     for k, v in obj.attrs.items(): ds.attrs[k] = v
-                    
-                    process_video(name, obj, ds, bg_img, lower_hsv, upper_hsv)
-                    
+                    process_video(name, obj, ds, bg_img, LOWER_HSV, UPPER_HSV)
                 else:
-                    if is_video: print(f"Copying (Raw): {name}")
-                    outfile.copy(obj, name)
+                    # Copy as is
+                    print(f"Copying (Raw): {name}")
+                    infile.copy(name, outfile)
 
         try:
             infile.visititems(visit_item)
@@ -143,16 +126,11 @@ if __name__ == '__main__':
     parser.add_argument('input_path', help="Input H5 file or directory")
     parser.add_argument('background_path', nargs='?', help="Background image or directory") 
     parser.add_argument('--camera', default='third', choices=['all', 'third', 'gripper'])
-    parser.add_argument('--debug-mask', action='store_true', help='Show mask overlay on first frame and exit')
     args = parser.parse_args()
     
-    # Handle optional background arg for debug mode
-    if args.debug_mask and not args.background_path:
-        args.background_path = "dummy.jpg" 
-        print("Note: Background image ignored in debug mode.")
-    elif not args.background_path:
+    if not args.background_path:
         parser.error("the following arguments are required: background_path")
-
+    
     import os
     
     # --- Input Discovery ---
@@ -184,8 +162,7 @@ if __name__ == '__main__':
         bg_files = [os.path.basename(args.background_path)]
 
     # --- Processing Loop ---
-    if not args.debug_mask:
-        print(f"Output Root Directory: {output_root}")
+    print(f"Output Root Directory: {output_root}")
     
     total_videos = len(h5_files)
     total_bgs = len(bg_files)
@@ -195,7 +172,7 @@ if __name__ == '__main__':
         
         # Create subfolder for this video: <name>_output
         video_out_dir = os.path.join(output_root, video_basename + '_output')
-        if not args.debug_mask and not os.path.exists(video_out_dir):
+        if not os.path.exists(video_out_dir):
             os.makedirs(video_out_dir)
             
         src_path = os.path.join(input_dir, h5_file)
@@ -211,4 +188,4 @@ if __name__ == '__main__':
             # Simpler progress print
             print(f"[{i+1}/{total_videos}] {h5_file} + {bg_file} -> {os.path.basename(video_out_dir)}/{final_name}")
             
-            process_file(src_path, bg_path, dst_path, args.camera, args.debug_mask)
+            process_file(src_path, bg_path, dst_path, args.camera)

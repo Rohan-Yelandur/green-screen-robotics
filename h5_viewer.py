@@ -1,13 +1,36 @@
 # H5 Video Viewer
 # Usage: python h5_viewer.py <input_h5_file> --camera third|gripper|all
-# 'q' to quit, 'p' to pause
+# 'q' to quit, 'p' to pause, 'v' to print pixel values, 'm' to toggle mask
 
 import h5py
 import cv2
 import numpy as np
 import argparse
 
+# Global state for mouse hover
+# Global state for mouse hover
+hover_dict = {}
+
+# Import get_mask and global constants from green_screen to ensure shared logic and values
+from green_screen import get_mask, LOWER_HSV, UPPER_HSV
+
+def mouse_callback(event, x, y, flags, param):
+    if event == cv2.EVENT_MOUSEMOVE:
+        hover_dict[param] = (x, y)
+
 def view_h5_video(h5_file, camera_view='all'):
+    # Initial HSV Configuration from global source
+    init_lower = LOWER_HSV
+    init_upper = UPPER_HSV
+    
+    # Callback for trackbars (pass)
+    def nothing(x):
+        pass
+
+    # Create 'Controls' window early, set default size and resizeable
+    cv2.namedWindow('Controls', cv2.WINDOW_NORMAL)
+    cv2.resizeWindow('Controls', 400, 300)
+    
     try:
         with h5py.File(h5_file, 'r') as f:
             video_datasets = []
@@ -24,8 +47,6 @@ def view_h5_video(h5_file, camera_view='all'):
                     if camera_view == 'all': should_include = True
                     elif camera_view == 'gripper' and is_gripper: should_include = True
                     elif camera_view == 'third' and is_third and not is_gripper: should_include = True
-                    # Fallback for third-person if 'third' requested but heuristic missed: usually first non-gripper
-                    # But keeping it simple for now as per "simple" request
                     
                     if should_include:
                          video_datasets.append((name, obj))
@@ -47,38 +68,146 @@ def view_h5_video(h5_file, camera_view='all'):
                 frames_data.append((name, data))
                 max_frames = max(max_frames, data.shape[0])
                 
-            print(f"Playing {max_frames} frames. 'q'=quit, 'p'=pause.")
+            print(f"Playing {max_frames} frames.")
+            print("Controls: 'q'=quit, 'p'=pause (or space), 'v'=pixel info, 'm'=toggle mask")
+            
+            # Initialize trackbars for 'Controls' window now that max_frames is known
+            # Playback Controls
+            cv2.createTrackbar('Time', 'Controls', 0, max_frames-1, nothing)
+            cv2.createTrackbar('Pause', 'Controls', 0, 1, nothing) # 0=Play, 1=Pause
+            cv2.createTrackbar('Mask', 'Controls', 0, 1, nothing) # 0=Off, 1=On
+            
+            # HSV Controls
+            cv2.createTrackbar('Low H', 'Controls', init_lower[0], 179, nothing)
+            cv2.createTrackbar('Low S', 'Controls', init_lower[1], 255, nothing)
+            cv2.createTrackbar('Low V', 'Controls', init_lower[2], 255, nothing)
+            cv2.createTrackbar('High H', 'Controls', init_upper[0], 179, nothing)
+            cv2.createTrackbar('High S', 'Controls', init_upper[1], 255, nothing)
+            cv2.createTrackbar('High V', 'Controls', init_upper[2], 255, nothing)
+
+            # Initialize windows and callbacks
+            for name, _ in frames_data:
+                cv2.namedWindow(name, cv2.WINDOW_NORMAL)
+                cv2.setMouseCallback(name, mouse_callback, name)
             
             idx = 0
             paused = False
+            # show_mask = False # Now controlled by trackbar
             
-            while idx < max_frames:
-                if idx > 0 and any(cv2.getWindowProperty(name, cv2.WND_PROP_VISIBLE) <= 0 for name, _ in frames_data):
+            last_hsv_print = None
+            
+            # Update 'Time' slider max range if needed (already set above using 0 as placeholder max logic issue?)
+            # Re-create trackbar with correct max_frames
+            cv2.setTrackbarMax('Time', 'Controls', max_frames - 1)
+            
+            while True:
+                # Handle Window Closure
+                if any(cv2.getWindowProperty(name, cv2.WND_PROP_VISIBLE) <= 0 for name, _ in frames_data) or \
+                   cv2.getWindowProperty('Controls', cv2.WND_PROP_VISIBLE) <= 0:
                     break
+                    
+                # 1. Sync Logic: Read Control State
+                pause_val = cv2.getTrackbarPos('Pause', 'Controls')
+                paused = (pause_val == 1)
+                
+                mask_val = cv2.getTrackbarPos('Mask', 'Controls')
+                show_mask = (mask_val == 1)
+                
+                slider_idx = cv2.getTrackbarPos('Time', 'Controls')
+                
+                # If paused, let slider control idx (Scrubbing)
+                if paused:
+                    if slider_idx != idx:
+                        idx = slider_idx
+                else:
+                    # If running, update slider to match idx (Playback)
+                    # Use setTrackbarPos to visualize progress
+                    if slider_idx != idx: # Avoid feedback loop fighting
+                         cv2.setTrackbarPos('Time', 'Controls', idx)
+                    
+                # Loop / End Handling
+                if idx >= max_frames:
+                    idx = 0 # Loop back
+                    cv2.setTrackbarPos('Time', 'Controls', 0)
+                
+                # 2. Read HSV Trackbars
+                lh = cv2.getTrackbarPos('Low H', 'Controls')
+                ls = cv2.getTrackbarPos('Low S', 'Controls')
+                lv = cv2.getTrackbarPos('Low V', 'Controls')
+                uh = cv2.getTrackbarPos('High H', 'Controls')
+                us = cv2.getTrackbarPos('High S', 'Controls')
+                uv = cv2.getTrackbarPos('High V', 'Controls')
+                
+                lower_hsv = np.array([lh, ls, lv])
+                upper_hsv = np.array([uh, us, uv])
+                
+                # Check for change to print
+                current_hsv_str = f"L: {lower_hsv}, U: {upper_hsv}"
+                if current_hsv_str != last_hsv_print:
+                    print(f"Update HSV: Lower={lower_hsv} Upper={upper_hsv}")
+                    last_hsv_print = current_hsv_str
 
                 for name, data in frames_data:
-                    if idx < len(data):
-                        frame = data[idx]
+                    # Safe indexing
+                    safe_idx = min(idx, len(data)-1)
+                    frame = data[safe_idx]
                         
-                        if frame.dtype != np.uint8:
-                            frame = (frame * 255).astype(np.uint8) if frame.max() <= 1.0 else frame.astype(np.uint8)
-                        
-                        if len(frame.shape)==2 or frame.shape[2]==1:
-                            frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-                        elif frame.shape[2]==3:
-                            pass
+                    if frame.dtype != np.uint8:
+                        frame = (frame * 255).astype(np.uint8) if frame.max() <= 1.0 else frame.astype(np.uint8)
+                    
+                    if len(frame.shape)==2 or frame.shape[2]==1:
+                        frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+                    elif frame.shape[2]==3:
+                        pass
+                    
+                    frame_display = frame.copy()
+                    
+                    # --- Mask Overlay ---
+                    if show_mask:
+                        mask = get_mask(frame_display, lower_hsv, upper_hsv)
+                        red_overlay = np.zeros_like(frame_display)
+                        red_overlay[:] = [0, 0, 255]
+                        frame_display = np.where(mask[..., None] > 0, red_overlay, frame_display)
 
-                        cv2.imshow(name, frame)
-                        cv2.setWindowTitle(name, f"{name} ({idx}/{max_frames})")
+                    cv2.imshow(name, frame_display)
+                    cv2.setWindowTitle(name, f"{name} ({safe_idx}/{max_frames})")
                 
-                key = cv2.waitKey(33 if not paused else 100)
+                # Key Handling
+                key = cv2.waitKey(33) # Always wait 33ms to allow UI updates
                 if key == ord('q'): break
-                if key == ord('p'): paused = not paused
+                if key == ord('p') or key == 32: # 'p' or space
+                    paused = not paused
+                    # Update UI to reflect key toggle
+                    cv2.setTrackbarPos('Pause', 'Controls', 1 if paused else 0)
+                    
+                if key == ord('m'): 
+                    # Toggle mask via trackbar
+                    new_mask_val = 1 if not show_mask else 0
+                    cv2.setTrackbarPos('Mask', 'Controls', new_mask_val)
+                    print(f"Mask Overlay: {'ON' if new_mask_val else 'OFF'}")
+                
+                # Check for 'v' key to print pixel info
+                if key == ord('v'):
+                    for name, data in frames_data:
+                        if name in hover_dict:
+                            mx, my = hover_dict[name]
+                            safe_idx = min(idx, len(data)-1)
+                            raw_frame = data[safe_idx]
+                            
+                            if raw_frame.dtype != np.uint8:
+                                raw_frame = (raw_frame * 255).astype(np.uint8) if raw_frame.max() <= 1.0 else raw_frame.astype(np.uint8)
+                            if len(raw_frame.shape)==2 or raw_frame.shape[2]==1:
+                                raw_frame = cv2.cvtColor(raw_frame, cv2.COLOR_GRAY2BGR)
+                                
+                            if 0 <= my < raw_frame.shape[0] and 0 <= mx < raw_frame.shape[1]:
+                                bgr_val = raw_frame[my, mx]
+                                pixel_1x1 = np.uint8([[bgr_val]])
+                                hsv_val = cv2.cvtColor(pixel_1x1, cv2.COLOR_BGR2HSV)[0][0]
+                                print(f"[{name}] Pos: ({mx},{my}) | BGR: {bgr_val} | HSV: {hsv_val}")
                 
                 if not paused: 
                     idx += 1
-                    if idx % 10 == 0: print(f"Frame {idx}/{max_frames}", end='\r')
-            
+                
             cv2.destroyAllWindows()
 
     except Exception as e:

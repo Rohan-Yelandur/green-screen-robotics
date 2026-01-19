@@ -19,5 +19,5 @@ Isolates green hues more reliably than RGB by separating color information from 
 ### 2. Morphological Operations
 Fills small holes and removes noise to ensure a clean, solid subject mask.
 
-### 3. Alpha Blending
+### 3. Alpha Blending - !!!CURRENTLY COMMENTED OUT!!!
 Softens the mask edges to smoothly blend the foreground with the background, preventing jagged outlines.

@@ -25,7 +25,6 @@ def get_mask(frame, lower_hsv, upper_hsv):
     return mask
 
 def process_video(name, in_ds, out_ds, bg_img, lower_hsv, upper_hsv):
-    """Processes a video dataset: applies green screen mask with feathering."""
     print(f"Processing (Masking): {name}")
     
     chunk_size = 100
@@ -33,7 +32,6 @@ def process_video(name, in_ds, out_ds, bg_img, lower_hsv, upper_hsv):
     
     # Resize background to match video dimensions
     bg_resized = cv2.resize(bg_img, (width, height))
-    bg_float = bg_resized.astype(float)
     
     for i in range(0, num_frames, chunk_size):
         end = min(i + chunk_size, num_frames)
@@ -48,24 +46,10 @@ def process_video(name, in_ds, out_ds, bg_img, lower_hsv, upper_hsv):
             if len(frame.shape) == 2: frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
             mask = get_mask(frame, lower_hsv, upper_hsv)
             
-            # Simple Masking
             mask_inv = cv2.bitwise_not(mask)
             fg = cv2.bitwise_and(frame, frame, mask=mask_inv)
             bg = cv2.bitwise_and(bg_resized, bg_resized, mask=mask)
             processed[j] = cv2.add(fg, bg)
-
-            # OR
-
-            # Feathering (Soft Edges)
-            # mask_soft = cv2.GaussianBlur(mask, (13, 13), 0)
-            
-            # # Alpha Blending
-            # alpha = mask_soft.astype(float) / 255.0
-            # alpha = cv2.merge([alpha, alpha, alpha])
-            
-            # frame_float = frame.astype(float)
-            # combined = frame_float * (1.0 - alpha) + bg_float * alpha
-            # processed[j] = combined.astype(np.uint8)
         
         out_ds[i:end] = processed
         print(f"  {end}/{num_frames}", end='\r')
@@ -90,7 +74,7 @@ def process_file(input_path, background_path, output_path, camera_filter='all'):
                 # Check for camera filter
                 path_lower = name.lower()
                 is_gripper = any(k in path_lower for k in ['gripper', 'eye_in_hand', 'wrist'])
-                is_third = any(k in path_lower for k in ['agentview', 'third', 'external', 'front'])
+                is_third = any(k in path_lower for k in ['agentview', 'third', 'external', 'front', 'primary'])
                 
                 should_process = False
                 if camera_filter == 'all': should_process = True

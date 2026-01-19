@@ -29,7 +29,7 @@ def view_h5_video(h5_file, camera_view='all'):
 
     # Create 'Controls' window early, set default size and resizeable
     cv2.namedWindow('Controls', cv2.WINDOW_NORMAL)
-    cv2.resizeWindow('Controls', 400, 300)
+    cv2.resizeWindow('Controls', 400, 400)
     
     try:
         with h5py.File(h5_file, 'r') as f:
@@ -92,9 +92,6 @@ def view_h5_video(h5_file, camera_view='all'):
             
             idx = 0
             paused = False
-            # show_mask = False # Now controlled by trackbar
-            
-            last_hsv_print = None
             
             # Update 'Time' slider max range if needed (already set above using 0 as placeholder max logic issue?)
             # Re-create trackbar with correct max_frames
@@ -140,12 +137,6 @@ def view_h5_video(h5_file, camera_view='all'):
                 
                 lower_hsv = np.array([lh, ls, lv])
                 upper_hsv = np.array([uh, us, uv])
-                
-                # Check for change to print
-                current_hsv_str = f"L: {lower_hsv}, U: {upper_hsv}"
-                if current_hsv_str != last_hsv_print:
-                    print(f"Update HSV: Lower={lower_hsv} Upper={upper_hsv}")
-                    last_hsv_print = current_hsv_str
 
                 for name, data in frames_data:
                     # Safe indexing
@@ -165,9 +156,7 @@ def view_h5_video(h5_file, camera_view='all'):
                     # --- Mask Overlay ---
                     if show_mask:
                         mask = get_mask(frame_display, lower_hsv, upper_hsv)
-                        red_overlay = np.zeros_like(frame_display)
-                        red_overlay[:] = [0, 0, 255]
-                        frame_display = np.where(mask[..., None] > 0, red_overlay, frame_display)
+                        frame_display[mask > 0] = [0, 0, 255]
 
                     cv2.imshow(name, frame_display)
                     cv2.setWindowTitle(name, f"{name} ({safe_idx}/{max_frames})")

@@ -12,7 +12,9 @@ LOWER_HSV = np.array([35, 60, 100])
 UPPER_HSV = np.array([85, 255, 255])
 MORPH_KERNEL = np.ones((3,3), np.uint8)
 DEPTH_THRESHOLD = 1500
+DEPTH_THRESHOLD = 1500 # mm
 USE_DEPTH_MASKING = False
+OUTPUT_SIZE = (128, 128) # (Width, Height)
 
 def get_mask(frame, lower_hsv, upper_hsv, depth_frame=None):
     """Unified mask function: Color Hysteresis + Optional Depth Cutoff."""
@@ -47,10 +49,12 @@ def process_video(name, in_ds, out_ds, bg_img, lower_hsv, upper_hsv, depth_ds=No
     print(f"Processing (Masking): {name}")
     
     chunk_size = 100
-    num_frames, height, width = in_ds.shape[:3]
+    num_frames = in_ds.shape[0]
+    # Input dimensions (for processing)
+    in_h, in_w = in_ds.shape[1:3]
     
-    # Resize background to match video dimensions
-    bg_resized = cv2.resize(bg_img, (width, height))
+    # Resize background to match video dimensions INPUT dimensions
+    bg_resized = cv2.resize(bg_img, (in_w, in_h))
     
     for i in range(0, num_frames, chunk_size):
         end = min(i + chunk_size, num_frames)
@@ -60,7 +64,12 @@ def process_video(name, in_ds, out_ds, bg_img, lower_hsv, upper_hsv, depth_ds=No
         if depth_ds is not None:
              depth_chunk = depth_ds[i:end]
              
-        processed = np.zeros_like(chunk)
+        
+        # Output buffer uses OUTPUT_SIZE
+        # Shape: (ChunkSize, H, W, Channels)
+        # Note: OUTPUT_SIZE is (W, H)
+        out_shape = (chunk.shape[0], OUTPUT_SIZE[1], OUTPUT_SIZE[0], chunk.shape[3])
+        processed = np.zeros(out_shape, dtype=chunk.dtype)
         
         for j, frame in enumerate(chunk):
             # Normalize if needed
@@ -79,7 +88,10 @@ def process_video(name, in_ds, out_ds, bg_img, lower_hsv, upper_hsv, depth_ds=No
             mask_inv = cv2.bitwise_not(mask)
             fg = cv2.bitwise_and(frame, frame, mask=mask_inv)
             bg = cv2.bitwise_and(bg_resized, bg_resized, mask=mask)
-            processed[j] = cv2.add(fg, bg)
+            combined = cv2.add(fg, bg)
+            
+            # Resize to output resolution
+            processed[j] = cv2.resize(combined, OUTPUT_SIZE)
         
         out_ds[i:end] = processed
         print(f"  {end}/{num_frames}", end='\r')
@@ -122,7 +134,11 @@ def process_file(input_path, background_path, output_path):
                              print(f"  + Using Depth Selection: {depth_name}")
 
                     # Create dataset in output file
-                    ds = outfile.create_dataset(name, shape=obj.shape, dtype=obj.dtype, chunks=True, compression='gzip')
+                    # Create dataset in output file with NEW dimensions
+                    # Original: (T, H, W, C) -> New: (T, OutH, OutW, C)
+                    new_shape = (obj.shape[0], OUTPUT_SIZE[1], OUTPUT_SIZE[0], obj.shape[3])
+                    
+                    ds = outfile.create_dataset(name, shape=new_shape, dtype=obj.dtype, chunks=True, compression='gzip')
                     for k, v in obj.attrs.items(): ds.attrs[k] = v
                     process_video(name, obj, ds, bg_img, LOWER_HSV, UPPER_HSV, depth_ds)
                 else:

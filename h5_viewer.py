@@ -8,15 +8,17 @@ import numpy as np
 import argparse
 
 # Global state for mouse hover
-# Global state for mouse hover
 hover_dict = {}
+last_hovered_window = None
 
 # Import get_mask and global constants from green_screen to ensure shared logic and values
-from green_screen import get_mask, LOWER_HSV, UPPER_HSV
+from green_screen import get_mask, LOWER_HSV, UPPER_HSV, DEPTH_THRESHOLD, USE_DEPTH_MASKING
 
 def mouse_callback(event, x, y, flags, param):
+    global last_hovered_window
     if event == cv2.EVENT_MOUSEMOVE:
         hover_dict[param] = (x, y)
+        last_hovered_window = param
 
 def view_h5_video(h5_file, camera_view='all'):
     # Initial HSV Configuration from global source
@@ -63,10 +65,37 @@ def view_h5_video(h5_file, camera_view='all'):
             frames_data = []
             max_frames = 0
             
+            # Create a lookup for depth datasets: RGB Name -> Depth Dataset
+            depth_lookup = {}
             for name, ds in video_datasets:
                 data = ds[:]
                 frames_data.append((name, data))
                 max_frames = max(max_frames, data.shape[0])
+                
+                # Check if this is a depth dataset to index it
+                # Convention: 'depth' in name.
+                # Logic: We actually want to map RGB -> Depth.
+                # So we iterate AGAIN or just index everything first?
+                # Let's index everything first.
+            
+            # Re-scan to build link
+            # Assumes names like "obs/primary_image" and "obs/primary_depth"
+            all_dataset_names = {name: ds for name, ds in video_datasets}
+            
+            rgb_to_depth_data = {}
+            
+            for name, _ in frames_data:
+                # If this is an RGB image, find its pair
+                if 'image' in name: # naive check
+                     potential_depth = name.replace('image', 'depth')
+                     if potential_depth in all_dataset_names:
+                         # Store the actual loaded numpy array, not the H5 dataset (closed later?)
+                         # Wait, we loaded all data into 'frames_data'.
+                         # Let's find the data in frames_data
+                         for n, d in frames_data:
+                             if n == potential_depth:
+                                 rgb_to_depth_data[name] = d
+                                 break
                 
             print(f"Playing {max_frames} frames.")
             print("Controls: 'q'=quit, 'p'=pause (or space), 'v'=pixel info, 'm'=toggle mask")
@@ -95,7 +124,7 @@ def view_h5_video(h5_file, camera_view='all'):
             
             # Update 'Time' slider max range if needed (already set above using 0 as placeholder max logic issue?)
             # Re-create trackbar with correct max_frames
-            cv2.setTrackbarMax('Time', 'Controls', max_frames - 1)
+
             
             while True:
                 # Handle Window Closure
@@ -144,7 +173,10 @@ def view_h5_video(h5_file, camera_view='all'):
                     frame = data[safe_idx]
                         
                     if frame.dtype != np.uint8:
-                        frame = (frame * 255).astype(np.uint8) if frame.max() <= 1.0 else frame.astype(np.uint8)
+                        if frame.max() <= 1.0:
+                            frame = (frame * 255).astype(np.uint8)
+                        else:
+                            frame = cv2.normalize(frame, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
                     
                     if len(frame.shape)==2 or frame.shape[2]==1:
                         frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
@@ -155,7 +187,14 @@ def view_h5_video(h5_file, camera_view='all'):
                     
                     # --- Mask Overlay ---
                     if show_mask:
-                        mask = get_mask(frame_display, lower_hsv, upper_hsv)
+                        # Find corresponding depth frame if exists
+                        current_depth_frame = None
+                        if name in rgb_to_depth_data:
+                            d_data = rgb_to_depth_data[name]
+                            if idx < len(d_data):
+                                current_depth_frame = d_data[idx]
+                        
+                        mask = get_mask(frame_display, lower_hsv, upper_hsv, current_depth_frame)
                         frame_display[mask > 0] = [0, 0, 255]
 
                     cv2.imshow(name, frame_display)
@@ -178,13 +217,22 @@ def view_h5_video(h5_file, camera_view='all'):
                 # Check for 'v' key to print pixel info
                 if key == ord('v'):
                     for name, data in frames_data:
-                        if name in hover_dict:
+                        # Only handle the window we are currently hovering over
+                        if name == last_hovered_window and name in hover_dict:
                             mx, my = hover_dict[name]
+                            
                             safe_idx = min(idx, len(data)-1)
                             raw_frame = data[safe_idx]
                             
+                            native_val = "N/A"
+                            if 0 <= my < raw_frame.shape[0] and 0 <= mx < raw_frame.shape[1]:
+                                native_val = raw_frame[my, mx]
+
                             if raw_frame.dtype != np.uint8:
-                                raw_frame = (raw_frame * 255).astype(np.uint8) if raw_frame.max() <= 1.0 else raw_frame.astype(np.uint8)
+                                if raw_frame.max() <= 1.0:
+                                    raw_frame = (raw_frame * 255).astype(np.uint8)
+                                else:
+                                    raw_frame = cv2.normalize(raw_frame, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
                             if len(raw_frame.shape)==2 or raw_frame.shape[2]==1:
                                 raw_frame = cv2.cvtColor(raw_frame, cv2.COLOR_GRAY2BGR)
                                 
@@ -192,7 +240,12 @@ def view_h5_video(h5_file, camera_view='all'):
                                 bgr_val = raw_frame[my, mx]
                                 pixel_1x1 = np.uint8([[bgr_val]])
                                 hsv_val = cv2.cvtColor(pixel_1x1, cv2.COLOR_BGR2HSV)[0][0]
-                                print(f"[{name}] Pos: ({mx},{my}) | BGR: {bgr_val} | HSV: {hsv_val}")
+                                
+                                # If native is scalar (depth), print simply. If array (color), print array
+                                if np.isscalar(native_val) or (isinstance(native_val, np.ndarray) and native_val.size == 1):
+                                     print(f"[{name}] Depth/Val: {native_val} | Display BGR: {bgr_val}")
+                                else:
+                                     print(f"[{name}] RGB/Native: {native_val} | HSV: {hsv_val}")
                 
                 if not paused: 
                     idx += 1

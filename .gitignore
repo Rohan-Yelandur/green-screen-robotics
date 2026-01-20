@@ -4,3 +4,5 @@ h5_files
 __pycache__
 *.pyc
 .DS_Store
+kitchen.jpg
+my_demo.h5

@@ -3,11 +3,12 @@ This repo contains scripts to replace the green screen in hdf5 files with backgr
 
 ## Usage
 
-`python green_screen.py <input_h5_file_or_folder> <background_image_or_folder> [--camera all|third|gripper] [--debug-mask]`
+`python green_screen.py <input_h5_file_or_folder> <background_image_or_folder>`
 
-`python h5_viewer.py <input_h5_file> --camera third|gripper|all`
+`python h5_viewer.py <input_h5_file>`
 
-The camera flag controls which camera's view to use.
+`python extract_video.py <input_h5_file>` -> outputs mp4
+
 
 Change the HSV Configuration in green_screen.py to change the color of the green screen.
 
@@ -18,6 +19,3 @@ Isolates green hues more reliably than RGB by separating color information from 
 
 ### 2. Morphological Operations
 Fills small holes and removes noise to ensure a clean, solid subject mask.
-
-### 3. Alpha Blending - !!!CURRENTLY COMMENTED OUT!!!
-Softens the mask edges to smoothly blend the foreground with the background, preventing jagged outlines.

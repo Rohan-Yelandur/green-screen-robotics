@@ -8,23 +8,42 @@ import argparse
 import os
 
 # Global HSV Configuration
-LOWER_HSV = np.array([35, 60, 50])
+LOWER_HSV = np.array([35, 60, 100])
 UPPER_HSV = np.array([85, 255, 255])
+MORPH_KERNEL = np.ones((3,3), np.uint8)
+DEPTH_THRESHOLD = 1500
+USE_DEPTH_MASKING = False
 
-def get_mask(frame, lower_hsv, upper_hsv):
-    """Creates a binary mask for green pixels using HSV with refinement."""
+def get_mask(frame, lower_hsv, upper_hsv, depth_frame=None):
+    """Unified mask function: Color Hysteresis + Optional Depth Cutoff."""
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(hsv, lower_hsv, upper_hsv)
+
+
+    # --- HYSTERESIS START ---
+    loose_lower = np.clip(lower_hsv - 10, 0, 255)
+    loose_upper = np.clip(upper_hsv + 10, 0, 255)
+    mask_strict = cv2.inRange(hsv, lower_hsv, upper_hsv)
+    mask_loose = cv2.inRange(hsv, loose_lower, loose_upper)
+    mask_strict_dilated = cv2.dilate(mask_strict, MORPH_KERNEL, iterations=1)
+    mask = cv2.bitwise_and(mask_loose, mask_strict_dilated)
+    # --- HYSTERESIS END ---
     
-    # Morphological Closing (Fill small holes in the foreground/background)
-    kernel = np.ones((5,5), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    # Morphological Closing
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, MORPH_KERNEL)
     
     # Denoise
-    mask = cv2.medianBlur(mask, 5)
+    mask = cv2.medianBlur(mask, 3)
+    
+    # --- DEPTH LOGIC START ---
+    if depth_frame is not None and USE_DEPTH_MASKING:
+        if depth_frame.shape[:2] == mask.shape[:2]:
+            is_background = (depth_frame > DEPTH_THRESHOLD).astype(np.uint8) * 255
+            mask = cv2.bitwise_and(mask, is_background)
+    # --- DEPTH LOGIC END ---
+    
     return mask
 
-def process_video(name, in_ds, out_ds, bg_img, lower_hsv, upper_hsv):
+def process_video(name, in_ds, out_ds, bg_img, lower_hsv, upper_hsv, depth_ds=None):
     print(f"Processing (Masking): {name}")
     
     chunk_size = 100
@@ -36,6 +55,11 @@ def process_video(name, in_ds, out_ds, bg_img, lower_hsv, upper_hsv):
     for i in range(0, num_frames, chunk_size):
         end = min(i + chunk_size, num_frames)
         chunk = in_ds[i:end]
+        
+        depth_chunk = None
+        if depth_ds is not None:
+             depth_chunk = depth_ds[i:end]
+             
         processed = np.zeros_like(chunk)
         
         for j, frame in enumerate(chunk):
@@ -44,7 +68,13 @@ def process_video(name, in_ds, out_ds, bg_img, lower_hsv, upper_hsv):
                 frame = (frame * 255).astype(np.uint8) if frame.max() <= 1.0 else frame.astype(np.uint8)
             
             if len(frame.shape) == 2: frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-            mask = get_mask(frame, lower_hsv, upper_hsv)
+            
+            # Extract depth frame if available
+            depth_frame = None
+            if depth_chunk is not None:
+                depth_frame = depth_chunk[j]
+
+            mask = get_mask(frame, lower_hsv, upper_hsv, depth_frame)
             
             mask_inv = cv2.bitwise_not(mask)
             fg = cv2.bitwise_and(frame, frame, mask=mask_inv)
@@ -55,14 +85,13 @@ def process_video(name, in_ds, out_ds, bg_img, lower_hsv, upper_hsv):
         print(f"  {end}/{num_frames}", end='\r')
     print("")
 
-def process_file(input_path, background_path, output_path, camera_filter='all'):
+def process_file(input_path, background_path, output_path):
     bg_img = cv2.imread(background_path)
     if bg_img is None:
         print(f"Error: Could not load {background_path}")
         return
     
     with h5py.File(input_path, 'r') as infile, h5py.File(output_path, 'w') as outfile:
-        # Copy file-level attributes
         for key, val in infile.attrs.items():
             outfile.attrs[key] = val
 
@@ -71,29 +100,31 @@ def process_file(input_path, background_path, output_path, camera_filter='all'):
                 if name not in outfile:
                     outfile.create_group(name)
             elif isinstance(obj, h5py.Dataset):
-                # Check for camera filter
                 path_lower = name.lower()
                 is_gripper = any(k in path_lower for k in ['gripper', 'eye_in_hand', 'wrist'])
                 is_third = any(k in path_lower for k in ['agentview', 'third', 'external', 'front', 'primary'])
-                
-                should_process = False
-                if camera_filter == 'all': should_process = True
-                elif camera_filter == 'gripper' and is_gripper: should_process = True
-                elif camera_filter == 'third' and is_third and not is_gripper: should_process = True
-                
-                # Check if it's a video (3D array)
                 is_video = len(obj.shape) >= 3
                 
-                # MASKING LOGIC: Only mask third-person cameras
-                should_mask = is_third and not is_gripper
+                # Exclude depth maps from being processed as color video
+                is_depth = 'depth' in path_lower
                 
+                should_mask = is_third and not is_gripper and not is_depth
                 if is_video and should_mask:
                     # Apply Green Screen Logic
                     print(f"Processing (Masking): {name}")
+                    # Try to find associated depth data
+                    # Assuming naming convention: 'image' -> 'depth'
+                    depth_ds = None
+                    if 'image' in name:
+                        depth_name = name.replace('image', 'depth')
+                        if depth_name in infile:
+                             depth_ds = infile[depth_name]
+                             print(f"  + Using Depth Selection: {depth_name}")
+
                     # Create dataset in output file
                     ds = outfile.create_dataset(name, shape=obj.shape, dtype=obj.dtype, chunks=True, compression='gzip')
                     for k, v in obj.attrs.items(): ds.attrs[k] = v
-                    process_video(name, obj, ds, bg_img, LOWER_HSV, UPPER_HSV)
+                    process_video(name, obj, ds, bg_img, LOWER_HSV, UPPER_HSV, depth_ds)
                 else:
                     # Copy as is
                     print(f"Copying (Raw): {name}")
@@ -109,13 +140,13 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('input_path', help="Input H5 file or directory")
     parser.add_argument('background_path', nargs='?', help="Background image or directory") 
-    parser.add_argument('--camera', default='third', choices=['all', 'third', 'gripper'])
+
     args = parser.parse_args()
     
     if not args.background_path:
         parser.error("the following arguments are required: background_path")
     
-    import os
+
     
     # --- Input Discovery ---
     # 1. Video Files
@@ -172,4 +203,4 @@ if __name__ == '__main__':
             # Simpler progress print
             print(f"[{i+1}/{total_videos}] {h5_file} + {bg_file} -> {os.path.basename(video_out_dir)}/{final_name}")
             
-            process_file(src_path, bg_path, dst_path, args.camera)
+            process_file(src_path, bg_path, dst_path)

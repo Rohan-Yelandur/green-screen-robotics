@@ -12,7 +12,6 @@ LOWER_HSV = np.array([35, 60, 100])
 UPPER_HSV = np.array([85, 255, 255])
 MORPH_KERNEL = np.ones((3,3), np.uint8)
 DEPTH_THRESHOLD = 1500
-DEPTH_THRESHOLD = 1500 # mm
 USE_DEPTH_MASKING = False
 OUTPUT_SIZE = (128, 128) # (Width, Height)
 
@@ -39,7 +38,8 @@ def get_mask(frame, lower_hsv, upper_hsv, depth_frame=None):
     # --- DEPTH LOGIC START ---
     if depth_frame is not None and USE_DEPTH_MASKING:
         if depth_frame.shape[:2] == mask.shape[:2]:
-            is_background = (depth_frame > DEPTH_THRESHOLD).astype(np.uint8) * 255
+            # Keep mask ONLY if depth > threshold (Background) OR depth == 0 (Noise/Far)
+            is_background = ((depth_frame > DEPTH_THRESHOLD) | (depth_frame == 0)).astype(np.uint8) * 255
             mask = cv2.bitwise_and(mask, is_background)
     # --- DEPTH LOGIC END ---
     
